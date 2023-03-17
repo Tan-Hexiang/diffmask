@@ -71,7 +71,7 @@ class DiffMaskGateInput(torch.nn.Module):
             )
 
     def forward(self, hidden_states, mask, layer_pred):
-
+        print("gates.py: hidden_states[0] shape {}".format(hidden_states[0].shape))
         logits = torch.cat(
             [
                 self.g_hat[i](hidden_states[0], hidden_states[i])
@@ -81,10 +81,11 @@ class DiffMaskGateInput(torch.nn.Module):
             ],
             -1,
         )
-
+        print("gates.py: logits.shape:{}".format(logits.shape))
         dist = RectifiedStreched(
             BinaryConcrete(torch.full_like(logits, 0.2), logits), l=-0.2, r=1.0,
         )
+
 
         gates_full = dist.rsample().cumprod(-1)
         expected_L0_full = dist.log_expected_L0().cumsum(-1)
