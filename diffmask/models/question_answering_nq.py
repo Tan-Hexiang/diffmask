@@ -1,12 +1,15 @@
 import json
 from collections import OrderedDict
+import random
 from tqdm.auto import tqdm
 import torch
 import logging
+import pandas as pd
 import pytorch_lightning as pl
 from transformers import (
     BertTokenizer,
     BertForQuestionAnswering,
+    T5Tokenizer,
     get_constant_schedule_with_warmup,
     get_constant_schedule,
 )
@@ -20,7 +23,7 @@ class QuestionAnsweringNQ(pl.LightningModule):
         super().__init__()
         self.hparams = hparams
         # fid固定使用t5的tokenizer
-        self.tokenizer = BertTokenizer.from_pretrained('t5-base', return_dict=False)
+        self.tokenizer = T5Tokenizer.from_pretrained('t5-base', return_dict=False)
         self.collator = Collator(self.hparams.text_maxlength, self.tokenizer)
     def prepare_data(self):
         # assign to use in dataloaders
@@ -28,10 +31,10 @@ class QuestionAnsweringNQ(pl.LightningModule):
             not hasattr(self, "train_dataset")
         ) and self.training:
             train_data = load_nq(self.hparams.train_filename)
-            self.train_dataset =  Dataset(train_data, n_context= self.hparams.n_context )
+            self.train_dataset =  Dataset(train_data, n_context= self.hparams.n_context, passages_source_path=self.hparams.passages_source_path)
         if not hasattr(self, "val_dataset") :
             val_data = load_nq(self.hparams.val_filename)
-            self.val_dataset = Dataset(val_data, n_context=self.hparams.n_context )
+            self.val_dataset = Dataset(val_data, n_context=self.hparams.n_context, passages_source_path=self.hparams.passages_source_path)
 
     def train_dataloader(self):
         return torch.utils.data.DataLoader(
@@ -55,6 +58,7 @@ class QuestionAnsweringNQ(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
 
         return loss
+    
     # TODO:完善Fid验证过程（不紧急）
     def validation_step(self, batch, batch_idx=None):
         (index, target_ids, target_mask, passage_ids, passage_masks) = batch
@@ -85,7 +89,7 @@ class QuestionAnsweringNQ(pl.LightningModule):
 class FidQuestionAnsweringNQ(QuestionAnsweringNQ):
     def __init__(self, hparams):
         super().__init__(hparams)
-        self.net = FiDT5.from_pretrained(self.hparams.model)
+        self.net = FiDT5.from_pretrained(self.hparams.model_path)
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         return self.net.forward(input_ids, attention_mask, **kwargs)
@@ -101,6 +105,7 @@ def load_nq(data_path=None, global_rank=-1, world_size=-1):
             data = json.load(fin)
     logging.info("successfully load data, len {}".format(len(data)))
     return data
+
 class Dataset(torch.utils.data.Dataset):
     def __init__(self,
                  data,
@@ -181,6 +186,7 @@ class Dataset(torch.utils.data.Dataset):
 
     def get_example(self, index):
         return self.data[index]
+    
 def encode_passages(batch_text_passages, tokenizer, max_length):
     passage_ids, passage_masks = [], []
     for k, text_passages in enumerate(batch_text_passages):
@@ -197,6 +203,7 @@ def encode_passages(batch_text_passages, tokenizer, max_length):
     passage_ids = torch.cat(passage_ids, dim=0)
     passage_masks = torch.cat(passage_masks, dim=0)
     return passage_ids, passage_masks.bool()
+
 class Collator(object):
     def __init__(self, text_maxlength, tokenizer, answer_maxlength=20):
         self.tokenizer = tokenizer

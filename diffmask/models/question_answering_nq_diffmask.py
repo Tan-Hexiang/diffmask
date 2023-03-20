@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import pytorch_lightning as pl
+import logging
 from transformers import (
     get_constant_schedule_with_warmup,
     get_constant_schedule,
@@ -16,6 +17,7 @@ from .gates import (
     PerSampleREINFORCEGate,
     MLPMaxGate,
     MLPGate,
+    DiffMaskGateInput_FidDecoder
 )
 from ..optim.lookahead import LookaheadRMSprop
 from ..utils.getter_setter import (
@@ -42,7 +44,8 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
             ):
                 return {"loss": torch.tensor(0.0, requires_grad=True)}
 
-        (input_ids, mask, token_type_ids, start_positions, end_positions,) = batch
+        (index, target_ids, target_mask, passage_ids, passage_masks) = batch
+        logging.debug("index{}, target_ids{}, target_mask{}, passage_ids{}, passage_masks{}".format(index, target_ids, target_mask, passage_ids, passage_masks))
 
         (
             logits,
@@ -53,13 +56,12 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
             expected_L0_full,
             layer_drop,
             layer_pred,
-        ) = self.forward_explainer(input_ids, mask, token_type_ids)
+        ) = self.forward_explainer(batch)
 
-        # logits_start, logits_end, logits_start_orig, logits_end_orig = tuple(
-        #     torch.where(mask.bool(), e, torch.full_like(e, -float("inf")))
-        #     for e in (logits_start, logits_end, logits_start_orig, logits_end_orig)
-        # )
-
+        logging.debug("logits:{}".format(logits.shape))
+        logging.debug("layer_pred:{}".format(layer_pred.shape))
+        logging.debug("layer_pred:{}".format(layer_pred))
+        
         loss_c = (
             torch.distributions.kl_divergence(
                 torch.distributions.Categorical(logits=logits_orig),
@@ -68,13 +70,13 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
             - self.hparams.eps
         )
 
-        loss_g = (expected_L0 * mask).sum(-1) / mask.sum(-1)
+        loss_g = expected_L0.sum(-1) 
 
         loss = self.alpha[layer_pred] * loss_c + loss_g
 
 
 
-        l0 = (expected_L0.exp() * mask).sum(-1) / mask.sum(-1)
+        l0 = expected_L0.exp() .sum(-1)
 
         outputs_dict = {
             "loss_c": loss_c.mean(-1),
@@ -201,7 +203,7 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
                 )
 
 
-class BertQuestionAnsweringNQDiffMask(
+class FidQuestionAnsweringNQDiffMask(
     QuestionAnsweringNQDiffMask, FidQuestionAnsweringNQ,
 ):
     def __init__(self, hparams):
@@ -214,9 +216,11 @@ class BertQuestionAnsweringNQDiffMask(
             ]
         )
 
-        gate = DiffMaskGateInput if self.hparams.gate == "input" else DiffMaskGateHidden
+        gate = DiffMaskGateInput_FidDecoder
 
         self.gate = gate(
+            n_context=hparams.n_context,
+            max_len=hparams.text_maxlength,
             hidden_size=self.net.config.hidden_size,
             hidden_attention=self.net.config.hidden_size // 4,
             num_hidden_layers=self.net.config.num_hidden_layers + 2,
@@ -224,11 +228,7 @@ class BertQuestionAnsweringNQDiffMask(
             gate_fn=MLPMaxGate if self.hparams.gate == "input" else MLPGate,
             gate_bias=hparams.gate_bias,
             placeholder=hparams.placeholder,
-            init_vector=self.net.bert.embeddings.word_embeddings.weight[
-                self.tokenizer.mask_token_id
-            ]
-            if self.hparams.layer_pred == 0 or self.hparams.gate == "input"
-            else None,
+            init_vector=None,
         )
 
         self.register_buffer(
@@ -240,28 +240,26 @@ class BertQuestionAnsweringNQDiffMask(
         self.register_buffer(
             "running_steps", torch.zeros((self.net.config.num_hidden_layers + 2,))
         )
+        for name, p in self.named_parameters():
+            if p.requires_grad:
+                print("requires_grad: {}".format(name))
+                logging.debug("requires_grad: {}".format(name))
+            else:
+                logging.debug("close grad of {}".format(name))
 
     def forward_explainer(
         self,
-        input_ids,
-        mask,
-        token_type_ids,
-        start_positions=None,
-        end_positions=None,
+        batch,
         layer_pred=None,
         attribution=False,
     ):
-
-        inputs_dict = {
-            "input_ids": input_ids,
-            "attention_mask": mask,
-            "token_type_ids": token_type_ids,
-        }
-
+        # passage_ids: bsz, n_context, len
+        # 训练解释的时候不更新net
         self.net.eval()
-
-        (logits_orig,), hidden_states = fid_getter(
-            self.net, inputs_dict
+        (index, target_ids, target_mask, passage_ids, passage_mask) = batch
+        # , forward_fn=self.net.generate
+        (loss, logits_orig,), hidden_states = fid_getter(
+            self.net, passage_ids, passage_mask, target_ids
         )
 
         if layer_pred is None:
@@ -289,31 +287,29 @@ class BertQuestionAnsweringNQDiffMask(
             layer_drop = 0
 
         (
-            new_hidden_state,
+            new_hidden_states,
             gates,
             expected_L0,
             gates_full,
             expected_L0_full,
         ) = self.gate(
             hidden_states=hidden_states,
-            mask=mask,
             layer_pred=None if attribution else layer_pred,
         )
 
         if attribution:
             return logits_orig, expected_L0_full
         else:
-
+            # mask decoder embedding之后的向量
             new_hidden_states = (
                 [None] * layer_drop
-                + [new_hidden_state]
+                + [new_hidden_states]
                 + [None] * (len(hidden_states) - layer_drop - 1)
             )
 
-            (logits), _ = fid_setter(
-                self.net, inputs_dict, hidden_states=new_hidden_states,
+            (logits,), _ = fid_setter(
+                self.net, passage_ids, passage_mask, hidden_states=new_hidden_states,
             )
-
         return (
             logits,
             logits_orig,
@@ -326,7 +322,7 @@ class BertQuestionAnsweringNQDiffMask(
         )
 
 
-class PerSampleBertQuestionAnsweringNQDiffMask(BertQuestionAnsweringNQDiffMask):
+class PerSampleFidQuestionAnsweringNQDiffMask(FidQuestionAnsweringNQDiffMask):
     def __init__(self, hparams):
         super().__init__(hparams)
 

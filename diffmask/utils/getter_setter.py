@@ -1,17 +1,18 @@
 import torch
 from transformers import BertForSequenceClassification
 from collections import defaultdict
+import logging
 
-def fid_getter(model, inputs_dict, forward_fn=None):
+def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
     hidden_states_ = []
 
     def get_hook(i):
         def hook(module, inputs, outputs=None):
             if i == 0:
                 hidden_states_.append(outputs)
-            elif 1 <= i <= len(model.bert.encoder.layer):
+            elif 1 <= i <= len(model.encoder.layer):
                 hidden_states_.append(inputs[0])
-            elif i == len(model.bert.encoder.layer) + 1:
+            elif i == len(model.encoder.layer) + 1:
                 hidden_states_.append(outputs[0])
 
         return hook
@@ -31,15 +32,16 @@ def fid_getter(model, inputs_dict, forward_fn=None):
 
     try:
         if forward_fn is None:
-            outputs = model(**inputs_dict)
+            logging.debug("passage_ids {}, passage_masks {}".format(passage_ids.shape, passage_masks.shape))
+            outputs = model(input_ids = passage_ids, attention_mask = passage_masks, labels = target_ids)
         else:
-            outputs = forward_fn(**inputs_dict)
+            outputs = forward_fn(passage_ids, passage_masks, 20)
     finally:
         for handle in handles:
             handle.remove()
 
     return outputs, tuple(hidden_states_)
-def fid_setter(model, inputs_dict, hidden_states, forward_fn=None):
+def fid_setter(model, passage_ids, passage_masks, hidden_states, forward_fn=None):
 
     hidden_states_ = []
 
@@ -83,9 +85,9 @@ def fid_setter(model, inputs_dict, hidden_states, forward_fn=None):
 
     try:
         if forward_fn is None:
-            outputs = model(**inputs_dict)
+            outputs = model(passage_ids, passage_masks)
         else:
-            outputs = forward_fn(**inputs_dict)
+            outputs = forward_fn(passage_ids, passage_masks)
     finally:
         for handle in handles:
             handle.remove()
@@ -98,12 +100,16 @@ def bert_getter(model, inputs_dict, forward_fn=None):
 
     def get_hook(i):
         def hook(module, inputs, outputs=None):
+            # print("hook {}: ".format(i))
             if i == 0:
                 hidden_states_.append(outputs)
+                # print(outputs.shape)
             elif 1 <= i <= len(model.bert.encoder.layer):
                 hidden_states_.append(inputs[0])
+                # print(inputs[0].shape)
             elif i == len(model.bert.encoder.layer) + 1:
                 hidden_states_.append(outputs[0])
+                # print(outputs[0].shape)
 
         return hook
 

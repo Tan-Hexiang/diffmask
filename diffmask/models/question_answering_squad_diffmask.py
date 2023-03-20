@@ -5,6 +5,7 @@ from transformers import (
     get_constant_schedule_with_warmup,
     get_constant_schedule,
 )
+import logging
 from .question_answering_squad import (
     QuestionAnsweringSquad,
     BertQuestionAnsweringSquad,
@@ -31,6 +32,7 @@ class QuestionAnsweringSquadDiffMask(QuestionAnsweringSquad):
 
         for p in self.parameters():
             p.requires_grad_(False)
+
 
     def training_step(self, batch, batch_idx=None, optimizer_idx=None):
 
@@ -254,6 +256,12 @@ class BertQuestionAnsweringSquadDiffMask(
         self.register_buffer(
             "running_steps", torch.zeros((self.net.config.num_hidden_layers + 2,))
         )
+        for name, p in self.named_parameters():
+            if p.requires_grad:
+                print("requires_grad: {}".format(name))
+                logging.debug("requires_grad: {}".format(name))
+            else:
+                logging.debug("close grad of {}".format(name))
 
     def forward_explainer(
         self,
@@ -277,6 +285,7 @@ class BertQuestionAnsweringSquadDiffMask(
         (logits_start_orig, logits_end_orig,), hidden_states = bert_getter(
             self.net, inputs_dict
         )
+        print("forward_explainer: hidden_states {}".format(len(hidden_states)))
 
         if layer_pred is None:
             if self.hparams.layer_pred == -1:
