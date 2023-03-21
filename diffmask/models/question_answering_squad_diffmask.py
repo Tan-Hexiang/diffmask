@@ -194,6 +194,7 @@ class QuestionAnsweringSquadDiffMask(QuestionAnsweringSquad):
                     p.grad = None
 
         elif optimizer_idx == 1:
+            # 优化alpha时反转梯度，对应lagrange relaxation中的max min
             for i in range(len(self.alpha)):
                 if self.alpha[i].grad:
                     self.alpha[i].grad *= -1
@@ -203,7 +204,7 @@ class QuestionAnsweringSquadDiffMask(QuestionAnsweringSquad):
             for g in optimizer.param_groups:
                 for p in g["params"]:
                     p.grad = None
-
+            # 保证在0--200之间
             for i in range(len(self.alpha)):
                 self.alpha[i].data = torch.where(
                     self.alpha[i].data < 0,
@@ -258,7 +259,6 @@ class BertQuestionAnsweringSquadDiffMask(
         )
         for name, p in self.named_parameters():
             if p.requires_grad:
-                print("requires_grad: {}".format(name))
                 logging.debug("requires_grad: {}".format(name))
             else:
                 logging.debug("close grad of {}".format(name))

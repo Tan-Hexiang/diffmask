@@ -36,16 +36,16 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
 
     def training_step(self, batch, batch_idx=None, optimizer_idx=None):
 
-        if self.training and self.hparams.stop_train and self.hparams.layer_pred != -1:
-            if (
-                self.running_acc[self.hparams.layer_pred] > 0.75
-                and self.running_l0[self.hparams.layer_pred] < 0.05
-                and self.running_steps[self.hparams.layer_pred] > 1000
-            ):
-                return {"loss": torch.tensor(0.0, requires_grad=True)}
+        # if self.training and self.hparams.stop_train and self.hparams.layer_pred != -1:
+        #     if (
+        #         self.running_acc[self.hparams.layer_pred] > 0.75
+        #         and self.running_l0[self.hparams.layer_pred] < 0.05
+        #         and self.running_steps[self.hparams.layer_pred] > 1000
+        #     ):
+        #         return {"loss": torch.tensor(0.0, requires_grad=True)}
 
         (index, target_ids, target_mask, passage_ids, passage_masks) = batch
-        logging.debug("index{}, target_ids{}, target_mask{}, passage_ids{}, passage_masks{}".format(index, target_ids, target_mask, passage_ids, passage_masks))
+        logging.info("index{}, target_ids{}, target_mask{}, passage_ids{}, passage_masks{}".format(index, target_ids, target_mask, passage_ids, passage_masks))
 
         (
             logits,
@@ -58,9 +58,9 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
             layer_pred,
         ) = self.forward_explainer(batch)
 
-        logging.debug("logits:{}".format(logits.shape))
-        logging.debug("layer_pred:{}".format(layer_pred.shape))
-        logging.debug("layer_pred:{}".format(layer_pred))
+        logging.info("logits:{}".format(logits.shape))
+        logging.info("layer_pred:{}".format(layer_pred.shape))
+        logging.info("layer_pred:{}".format(layer_pred))
         
         loss_c = (
             torch.distributions.kl_divergence(
@@ -107,28 +107,25 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
             self.running_steps[layer_pred] += 1
 
         return outputs_dict
+    
+    def validation_step(self, batch, batch_idx=None):
+        return self.training_step(batch, batch_idx)
 
     def validation_epoch_end(self, outputs):
 
-        outputs_dict = {
-            k: [e[k] for e in outputs if k in e]
-            for k in ("val_loss_c", "val_loss_g", "val_acc", "val_l0")
-        }
+        loss = sum([e['loss'] for e in outputs ]) / len(outputs)
+        loss_c = sum([e['loss_c'] for e in outputs])/ len(outputs)
+        loss_g = sum([e['loss_g'] for e in outputs])/ len(outputs)
+        l0 = sum([e['l0'] for e in outputs])/len(outputs)
+        alpha = sum([e['alpha'] for e in outputs])/len(outputs)
+        return {
+            "val_loss":loss,
+            "val_loss_c": loss_c,
+            "val_loss_g": loss_g,
+            "val_alpha":alpha,
+            "val_l0": l0,
+            }
 
-        outputs_dict = {k: sum(v) / len(v) for k, v in outputs_dict.items()}
-
-        outputs_dict["val_loss_c"] += self.hparams.eps
-
-        outputs_dict = {
-            "val_loss": outputs_dict["val_l0"]
-            if outputs_dict["val_loss_c"] <= self.hparams.eps_valid
-            and outputs_dict["val_acc"] >= self.hparams.acc_valid
-            else torch.full_like(outputs_dict["val_l0"], float("inf")),
-            **outputs_dict,
-            "log": outputs_dict,
-        }
-
-        return outputs_dict
 
     def configure_optimizers(self):
         optimizers = [
@@ -208,11 +205,12 @@ class FidQuestionAnsweringNQDiffMask(
 ):
     def __init__(self, hparams):
         super().__init__(hparams)
+        # lagrange multiplier
 
         self.alpha = torch.nn.ParameterList(
             [
                 torch.nn.Parameter(torch.ones(()))
-                for _ in range(self.net.config.num_hidden_layers + 2)
+                for _ in range(self.net.config.num_layers + 2)
             ]
         )
 
@@ -221,9 +219,9 @@ class FidQuestionAnsweringNQDiffMask(
         self.gate = gate(
             n_context=hparams.n_context,
             max_len=hparams.text_maxlength,
-            hidden_size=self.net.config.hidden_size,
-            hidden_attention=self.net.config.hidden_size // 4,
-            num_hidden_layers=self.net.config.num_hidden_layers + 2,
+            hidden_size=self.net.config.d_model,
+            hidden_attention=self.net.config.d_model // 4,
+            num_hidden_layers=self.net.config.num_layers + 2,
             max_position_embeddings=1,
             gate_fn=MLPMaxGate if self.hparams.gate == "input" else MLPGate,
             gate_bias=hparams.gate_bias,
@@ -242,10 +240,10 @@ class FidQuestionAnsweringNQDiffMask(
         )
         for name, p in self.named_parameters():
             if p.requires_grad:
-                print("requires_grad: {}".format(name))
-                logging.debug("requires_grad: {}".format(name))
+                # print("requires_grad: {}".format(name))
+                logging.info("requires_grad: {} {}".format(name, p.shape))
             else:
-                logging.debug("close grad of {}".format(name))
+                logging.info("close grad of {}".format(name))
 
     def forward_explainer(
         self,
@@ -257,11 +255,13 @@ class FidQuestionAnsweringNQDiffMask(
         # 训练解释的时候不更新net
         self.net.eval()
         (index, target_ids, target_mask, passage_ids, passage_mask) = batch
-        # , forward_fn=self.net.generate
-        (loss, logits_orig,), hidden_states = fid_getter(
+
+        logits_orig, hidden_states = fid_getter(
             self.net, passage_ids, passage_mask, target_ids
         )
-
+        logging.info("logits_orig:{}".format(logits_orig))
+        logging.info("hidden_states: {} {}".format(type(hidden_states),len(hidden_states)))
+        print("hidden_states: {} {}".format(type(hidden_states),len(hidden_states)))
         if layer_pred is None:
             if self.hparams.layer_pred == -1:
                 if self.hparams.stop_train:
@@ -307,8 +307,8 @@ class FidQuestionAnsweringNQDiffMask(
                 + [None] * (len(hidden_states) - layer_drop - 1)
             )
 
-            (logits,), _ = fid_setter(
-                self.net, passage_ids, passage_mask, hidden_states=new_hidden_states,
+            logits, _ = fid_setter(
+                self.net, passage_ids, passage_mask, target_ids, hidden_states=new_hidden_states,
             )
         return (
             logits,

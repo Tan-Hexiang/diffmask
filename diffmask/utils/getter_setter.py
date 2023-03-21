@@ -2,6 +2,11 @@ import torch
 from transformers import BertForSequenceClassification
 from collections import defaultdict
 import logging
+from diffmask.models.question_answering_nq import (
+load_nq, Dataset, Collator
+)
+from transformers import T5Tokenizer
+from ..models.fid import FiDT5
 
 def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
     hidden_states_ = []
@@ -9,10 +14,11 @@ def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
     def get_hook(i):
         def hook(module, inputs, outputs=None):
             if i == 0:
+                logging.debug("embedding outputs{} {}".format(type(outputs),outputs))
                 hidden_states_.append(outputs)
-            elif 1 <= i <= len(model.encoder.layer):
+            elif 1 <= i <= len(model.decoder.block):
                 hidden_states_.append(inputs[0])
-            elif i == len(model.encoder.layer) + 1:
+            elif i == len(model.decoder.block) + 1:
                 hidden_states_.append(outputs[0])
 
         return hook
@@ -20,7 +26,7 @@ def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
     handles = (
             [model.decoder.embed_tokens.register_forward_hook(get_hook(0))]
             + [
-                block.register_forward_pre_hook(get_hook(i + 1))
+                model.decoder.block.register_forward_pre_hook(get_hook(i + 1))
                 for i, block in enumerate(model.decoder.block)
             ]
             + [
@@ -33,7 +39,8 @@ def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
     try:
         if forward_fn is None:
             logging.debug("passage_ids {}, passage_masks {}".format(passage_ids.shape, passage_masks.shape))
-            outputs = model(input_ids = passage_ids, attention_mask = passage_masks, labels = target_ids)
+            # loss, logits, ...
+            outputs = model(input_ids = passage_ids, attention_mask = passage_masks, lm_labels = target_ids)[1]
         else:
             outputs = forward_fn(passage_ids, passage_masks, 20)
     finally:
@@ -41,7 +48,8 @@ def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
             handle.remove()
 
     return outputs, tuple(hidden_states_)
-def fid_setter(model, passage_ids, passage_masks, hidden_states, forward_fn=None):
+
+def fid_setter(model, passage_ids, passage_masks, target_ids, hidden_states, forward_fn=None):
 
     hidden_states_ = []
 
@@ -54,38 +62,38 @@ def fid_setter(model, passage_ids, passage_masks, hidden_states, forward_fn=None
                 else:
                     hidden_states_.append(outputs)
 
-            elif 1 <= i <= len(model.bert.encoder.layer):
-                if hidden_states[i] is not None:
-                    hidden_states_.append(hidden_states[i])
-                    return (hidden_states[i],) + inputs[1:]
-                else:
-                    hidden_states_.append(inputs[0])
+            # elif 1 <= i <= len(model.bert.encoder.layer):
+            #     if hidden_states[i] is not None:
+            #         hidden_states_.append(hidden_states[i])
+            #         return (hidden_states[i],) + inputs[1:]
+            #     else:
+            #         hidden_states_.append(inputs[0])
 
-            elif i == len(model.bert.encoder.layer) + 1:
-                if hidden_states[i] is not None:
-                    hidden_states_.append(hidden_states[i])
-                    return (hidden_states[i],) + outputs[1:]
-                else:
-                    hidden_states_.append(outputs[0])
+            # elif i == len(model.bert.encoder.layer) + 1:
+            #     if hidden_states[i] is not None:
+            #         hidden_states_.append(hidden_states[i])
+            #         return (hidden_states[i],) + outputs[1:]
+            #     else:
+            #         hidden_states_.append(outputs[0])
 
         return hook
 
     handles = (
-        [model.decoder.embed_tokens.register_forward_hook(get_hook(0))]
-        + [
-            block.register_forward_pre_hook(get_hook(i + 1))
-            for i, block in enumerate(model.decoder.block)
-        ]
-        + [
-            model.decoder.block[-1].register_forward_hook(
-                get_hook(len(model.decoder.block) + 1)
-            )
-        ]
+        [model.encoder.encoder.embed_tokens.register_forward_hook(get_hook(0))]
+        # + [
+        #     block.register_forward_pre_hook(get_hook(i + 1))
+        #     for i, block in enumerate(model.decoder.block)
+        # ]
+        # + [
+        #     model.decoder.block[-1].register_forward_hook(
+        #         get_hook(len(model.decoder.block) + 1)
+        #     )
+        # ]
     )
 
     try:
         if forward_fn is None:
-            outputs = model(passage_ids, passage_masks)
+            outputs = model(input_ids = passage_ids, attention_mask = passage_masks, labels = target_ids)[1]
         else:
             outputs = forward_fn(passage_ids, passage_masks)
     finally:
@@ -192,58 +200,6 @@ def bert_setter(model, inputs_dict, hidden_states, forward_fn=None):
     return outputs, tuple(hidden_states_)
 
 
-# def bert_setter(model, inputs_dict, hidden_states, forward_fn=None):
-
-#     hidden_states_ = []
-
-#     def get_hook(i):
-#         def hook(module, inputs, outputs=None):
-#             if i == 0:
-#                 if hidden_states[i] is not None:
-#                     hidden_states_.append(hidden_states[i])
-#                     return hidden_states[i]
-#                 else:
-#                     hidden_states_.append(outputs)
-
-#             elif 1 <= i <= len(model.bert.encoder.layer):
-#                 if hidden_states[i] is not None:
-#                     hidden_states_.append(hidden_states[i])
-#                     return hidden_states[i] + inputs[2:]
-#                 else:
-#                     hidden_states_.append(inputs[1])
-
-#             elif i == len(model.bert.encoder.layer) + 1:
-#                 if hidden_states[i] is not None:
-#                     hidden_states_.append(hidden_states[i])
-#                     return (hidden_states[i],) + outputs[1:]
-#                 else:
-#                     hidden_states_.append(outputs[0])
-
-#         return hook
-
-#     handles = (
-#         [model.bert.embeddings.word_embeddings.register_forward_hook(get_hook(0))]
-#         + [
-#             layer.register_forward_pre_hook(get_hook(i + 1))
-#             for i, layer in enumerate(model.bert.encoder.layer)
-#         ]
-#         + [
-#             model.bert.encoder.layer[-1].register_forward_hook(
-#                 get_hook(len(model.bert.encoder.layer) + 1)
-#             )
-#         ]
-#     )
-
-#     try:
-#         if forward_fn is None:
-#             outputs = model(**inputs_dict)
-#         else:
-#             outputs = forward_fn(**inputs_dict)
-#     finally:
-#         for handle in handles:
-#             handle.remove()
-
-#     return outputs, tuple(hidden_states_)
 
 
 def gru_getter(model, inputs_dict):
@@ -340,6 +296,23 @@ def toy_setter(model, inputs_dict, hidden_states):
 
     return outputs, None
 
+def test_fid_getter():
+   
+    tokenizer = T5Tokenizer.from_pretrained('t5-base', return_dict=False)
+    collator = Collator(200, tokenizer)
+    data = load_nq("/data/tanhexiang/tevatron/tevatron/data_nq/result100/fid.nq.test.jsonl")
+    dataset = Dataset(data, n_context=100, passages_source_path="/data/tanhexiang/CF_QA/data/wikipedia_split/psgs_w100.tsv")
+    dataloader = torch.utils.data.DataLoader(
+                dataset, batch_size=2, shuffle=True, collate_fn=collator
+            )
+    batch = next(iter(dataloader))
+    (index, target_ids, target_mask, passage_ids, passage_mask) = batch
+    
+    model = FiDT5.from_pretrained("/data/tanhexiang/CF_QA/models/reader/nq_reader_base")
+    model.eval()
+    (loss, logits, decoder_hidden_states) = model(passage_ids, passage_mask, labels = target_ids, output_hidden_states=True)
+    print(len(origin_output))
+    
 
 def test_bert_getter():
 
@@ -400,3 +373,6 @@ def test_bert_setter():
             [None] * i + [h * 0] + [None] * (len(hidden_states) - 1 - i),
         )
         assert all((a != b).all() for a, b in zip(outputs, outputs_))
+
+if __name__=="__main__":
+    test_fid_getter()

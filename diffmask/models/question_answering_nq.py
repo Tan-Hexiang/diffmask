@@ -25,6 +25,7 @@ class QuestionAnsweringNQ(pl.LightningModule):
         # fid固定使用t5的tokenizer
         self.tokenizer = T5Tokenizer.from_pretrained('t5-base', return_dict=False)
         self.collator = Collator(self.hparams.text_maxlength, self.tokenizer)
+        
     def prepare_data(self):
         # assign to use in dataloaders
         if (
@@ -46,31 +47,35 @@ class QuestionAnsweringNQ(pl.LightningModule):
             self.val_dataset, batch_size=self.hparams.batch_size, collate_fn=self.collator
         )
 
-    def training_step(self, batch, batch_idx=None):
-        # if self.training:
-        #     return {
-        #         "loss": torch.tensor(0.0, device=batch[0].device, requires_grad=True)
-        #     }
-        (index, target_ids, target_mask, passage_ids, passage_masks) = batch
-        loss = self(input_ids=passage_ids, attention_mask=passage_masks, labels=target_ids)[0]
-        # logs metrics for each training_step,
-        # and the average across the epoch, to the progress bar and logger
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+    # def training_step(self, batch, batch_idx=None):
+    #     # if self.training:
+    #     #     return {
+    #     #         "loss": torch.tensor(0.0, device=batch[0].device, requires_grad=True)
+    #     #     }
+    #     (index, target_ids, target_mask, passage_ids, passage_masks) = batch
+    #     loss = self(input_ids=passage_ids, attention_mask=passage_masks, labels=target_ids)[0]
+    #     # logs metrics for each training_step,
+    #     # and the average across the epoch, to the progress bar and logger
+    #     self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
 
-        return loss
+    #     return loss
     
     # TODO:完善Fid验证过程（不紧急）
-    def validation_step(self, batch, batch_idx=None):
-        (index, target_ids, target_mask, passage_ids, passage_masks) = batch
-        loss = self(input_ids=passage_ids, attention_mask=passage_masks, labels=target_ids)[0]
-        # logs metrics for each training_step,
-        # and the average across the epoch, to the progress bar and logger
-        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+ 
 
-        return loss
-    def validation_epoch_end(self, outputs):
-        acc = sum(outputs) / len(outputs)
-        return acc
+    # def validation_epoch_end(self, outputs):
+    #     loss = sum([e['loss'] for e in outputs ]) / len(outputs)
+    #     loss_c = sum([e['loss_c'] for e in outputs])/ len(outputs)
+    #     loss_g = sum([e['loss_g'] for e in outputs])/ len(outputs)
+    #     l0 = sum([e['l0'] for e in outputs])/len(outputs)
+    #     alpha = sum([e['alpha'] for e in outputs])/len(outputs)
+    #     return {
+    #         "loss":loss,
+    #         "loss_c": loss_c,
+    #         "loss_g": loss_g,
+    #         "alpha":alpha,
+    #         "l0": l0,
+    #         }
 
     def configure_optimizers(self):
         optimizers = [

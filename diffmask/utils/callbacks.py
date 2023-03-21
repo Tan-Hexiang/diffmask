@@ -36,6 +36,15 @@ class CallbackSquadDiffMask(pl.Callback):
                 trainer.callback_metrics["val_loss_c"],
             )
         )
+class CallbackNQDiffMask(pl.Callback):
+    def on_validation_end(self, trainer, pl_module):
+        print(
+            "Epoch {}: Validation accuracy = {:.2f}, gates at zero = {:.2%}, constraint = {:.5f}".format(
+                trainer.callback_metrics["epoch"] + 1,
+                1 - trainer.callback_metrics["val_l0"],
+                trainer.callback_metrics["val_loss_c"],
+            )
+        )
 
 
 class CallbackToyTask(pl.Callback):

@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import logging
 from .distributions import RectifiedStreched, BinaryConcrete
 
 
@@ -74,11 +75,14 @@ class DiffMaskGateInput_FidDecoder(torch.nn.Module):
             )
 
     def forward(self, hidden_states, layer_pred):
-        print("gates.py: hidden_states[0] shape {}".format(hidden_states[0].shape))
+        # logging.info("gates.py: hidden_states shape {}".format(hidden_states))
+        logging.DEBUG("gates.py: hidden_states[0] shape {}".format(hidden_states[0]))
         # hidden_states: bsz, n_context*len,  hidden_size
-        bsz, _ , hidden_size = hidden_states.shape
-        assert hidden_states.shape[1] == self.max_len * self.n_context
-        hidden_states = hidden_states.view(bsz, self.n_context, -1)
+        bsz, _ , hidden_size = hidden_states[0].shape
+        assert hidden_states[0].shape[1] == self.max_len * self.n_context
+        reshaped_hidden_states = []
+        for h in hidden_states:
+            reshaped_hidden_states.append(h.view(bsz,self.n_context,-1))
         # hidden_states : bsz, n_context, len*hidden_size
 
         logits = torch.cat(
@@ -90,7 +94,7 @@ class DiffMaskGateInput_FidDecoder(torch.nn.Module):
             ],
             -1,
         )
-        print("gates.py: logits.shape:{}".format(logits.shape))
+        logging.DEBUG("gates.py: logits.shape:{}".format(logits.shape))
         # logits: bsz, n_context, n_layer
         dist = RectifiedStreched(
             BinaryConcrete(torch.full_like(logits, 0.2), logits), l=-0.2, r=1.0,
@@ -102,10 +106,10 @@ class DiffMaskGateInput_FidDecoder(torch.nn.Module):
 
         gates = gates_full[..., -1]
         expected_L0 = expected_L0_full[..., -1]
-        print("gate.py: expected_L0 {}".format(expected_L0.shape))
-        print("gate.py: gates_full {}".format(gates_full.shape))
-        print("gate.py: gates {}".format(gates.shape))
-        print("gate.py: gates {}".format(gates))
+        logging.DEBUG("gate.py: expected_L0 {}".format(expected_L0.shape))
+        logging.DEBUG("gate.py: gates_full {}".format(gates_full.shape))
+        logging.DEBUG("gate.py: gates {}".format(gates.shape))
+        logging.DEBUG("gate.py: gates {}".format(gates))
         # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],].shape))
         # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],]))
         new_hidden_states = hidden_states[0] * gates.unsqueeze(-1)+self.placeholder[:, : hidden_states[0].shape[-2],]* (1 - gates).unsqueeze(-1),
@@ -154,7 +158,7 @@ class DiffMaskGateInput(torch.nn.Module):
             )
 
     def forward(self, hidden_states, mask, layer_pred):
-        print("gates.py: hidden_states[0] shape {}".format(hidden_states[0].shape))
+        logging.DEBUG("gates.py: hidden_states[0] shape {}".format(hidden_states[0].shape))
         # hidden_states: 1024
         # hidden_states : 1, 384(len), 1024
         # logits: 1, 384, 26(layer num)
@@ -167,7 +171,7 @@ class DiffMaskGateInput(torch.nn.Module):
             ],
             -1,
         )
-        print("gates.py: logits.shape:{}".format(logits.shape))
+        logging.DEBUG("gates.py: logits.shape:{}".format(logits.shape))
         dist = RectifiedStreched(
             BinaryConcrete(torch.full_like(logits, 0.2), logits), l=-0.2, r=1.0,
         )
@@ -178,10 +182,10 @@ class DiffMaskGateInput(torch.nn.Module):
 
         gates = gates_full[..., -1]
         expected_L0 = expected_L0_full[..., -1]
-        print("gate.py: expected_L0 {}".format(expected_L0.shape))
-        print("gate.py: gates_full {}".format(gates_full.shape))
-        print("gate.py: gates {}".format(gates.shape))
-        print("gate.py: gates {}".format(gates))
+        logging.DEBUG("gate.py: expected_L0 {}".format(expected_L0.shape))
+        logging.DEBUG("gate.py: gates_full {}".format(gates_full.shape))
+        logging.DEBUG("gate.py: gates {}".format(gates.shape))
+        logging.DEBUG("gate.py: gates {}".format(gates))
         # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],].shape))
         # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],]))
 
