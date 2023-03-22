@@ -45,7 +45,6 @@ class DiffMaskGateInput_FidDecoder(torch.nn.Module):
         max_position_embeddings: int,
         gate_fn: torch.nn.Module = MLPMaxGate,
         gate_bias: bool = True,
-        placeholder: bool = False,
         init_vector: torch.Tensor = None,
     ):
         super().__init__()
@@ -59,27 +58,13 @@ class DiffMaskGateInput_FidDecoder(torch.nn.Module):
             ]
         )
 
-        if placeholder:
-            self.placeholder = torch.nn.Parameter(
-                torch.nn.init.xavier_normal_(
-                    torch.empty(1, max_position_embeddings, hidden_size*self.max_len,)
-                )
-                if init_vector is None
-                else init_vector.view(1, 1, hidden_size).repeat(
-                    1, max_position_embeddings, 1
-                )
-            )
-        else:
-            self.register_buffer(
-                "placeholder", torch.zeros((1, 1, hidden_size,)),
-            )
-
     def forward(self, hidden_states, layer_pred):
-        # logging.info("gates.py: hidden_states shape {}".format(hidden_states))
-        logging.DEBUG("gates.py: hidden_states[0] shape {}".format(hidden_states[0]))
-        # hidden_states: bsz, n_context*len,  hidden_size
-        bsz, _ , hidden_size = hidden_states[0].shape
-        assert hidden_states[0].shape[1] == self.max_len * self.n_context
+        logging.info("gates.py: hidden_states[0] shape {}".format(hidden_states[0].shape))
+
+        # hidden_states: bsz*n_context, len,  hidden_size
+        temp, _ , hidden_size = hidden_states[0].shape
+        bsz = int(temp / self.n_context)
+        assert hidden_states[0].shape[1] == self.max_len
         reshaped_hidden_states = []
         for h in hidden_states:
             reshaped_hidden_states.append(h.view(bsz,self.n_context,-1))
@@ -87,14 +72,14 @@ class DiffMaskGateInput_FidDecoder(torch.nn.Module):
 
         logits = torch.cat(
             [
-                self.g_hat[i](hidden_states[0], hidden_states[i])
+                self.g_hat[i](reshaped_hidden_states[0], reshaped_hidden_states[i])
                 for i in range(
-                    (layer_pred + 1) if layer_pred is not None else len(hidden_states)
+                    (layer_pred + 1) if layer_pred is not None else len(reshaped_hidden_states)
                 )
             ],
             -1,
         )
-        logging.DEBUG("gates.py: logits.shape:{}".format(logits.shape))
+        logging.info("gates.py: logits.shape:{}".format(logits.shape))
         # logits: bsz, n_context, n_layer
         dist = RectifiedStreched(
             BinaryConcrete(torch.full_like(logits, 0.2), logits), l=-0.2, r=1.0,
@@ -103,18 +88,14 @@ class DiffMaskGateInput_FidDecoder(torch.nn.Module):
 
         gates_full = dist.rsample().cumprod(-1)
         expected_L0_full = dist.log_expected_L0().cumsum(-1)
-
+        # gates: bsz, n_context
         gates = gates_full[..., -1]
         expected_L0 = expected_L0_full[..., -1]
-        logging.DEBUG("gate.py: expected_L0 {}".format(expected_L0.shape))
-        logging.DEBUG("gate.py: gates_full {}".format(gates_full.shape))
-        logging.DEBUG("gate.py: gates {}".format(gates.shape))
-        logging.DEBUG("gate.py: gates {}".format(gates))
-        # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],].shape))
-        # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],]))
-        new_hidden_states = hidden_states[0] * gates.unsqueeze(-1)+self.placeholder[:, : hidden_states[0].shape[-2],]* (1 - gates).unsqueeze(-1),
+        logging.info("gate.py: expected_L0 {}".format(expected_L0.shape))
+        logging.info("gate.py: gates_full {}".format(gates_full.shape))
+        logging.info("gate.py: gates {}".format(gates.shape))
+    
         return (
-            new_hidden_states.view(bsz, self.n_context * self.max_len, -1),
             gates,
             expected_L0,
             gates_full,
@@ -158,7 +139,7 @@ class DiffMaskGateInput(torch.nn.Module):
             )
 
     def forward(self, hidden_states, mask, layer_pred):
-        logging.DEBUG("gates.py: hidden_states[0] shape {}".format(hidden_states[0].shape))
+        logging.info("gates.py: hidden_states[0] shape {}".format(hidden_states[0].shape))
         # hidden_states: 1024
         # hidden_states : 1, 384(len), 1024
         # logits: 1, 384, 26(layer num)
@@ -171,7 +152,7 @@ class DiffMaskGateInput(torch.nn.Module):
             ],
             -1,
         )
-        logging.DEBUG("gates.py: logits.shape:{}".format(logits.shape))
+        logging.info("gates.py: logits.shape:{}".format(logits.shape))
         dist = RectifiedStreched(
             BinaryConcrete(torch.full_like(logits, 0.2), logits), l=-0.2, r=1.0,
         )
@@ -182,10 +163,10 @@ class DiffMaskGateInput(torch.nn.Module):
 
         gates = gates_full[..., -1]
         expected_L0 = expected_L0_full[..., -1]
-        logging.DEBUG("gate.py: expected_L0 {}".format(expected_L0.shape))
-        logging.DEBUG("gate.py: gates_full {}".format(gates_full.shape))
-        logging.DEBUG("gate.py: gates {}".format(gates.shape))
-        logging.DEBUG("gate.py: gates {}".format(gates))
+        logging.info("gate.py: expected_L0 {}".format(expected_L0.shape))
+        logging.info("gate.py: gates_full {}".format(gates_full.shape))
+        logging.info("gate.py: gates {}".format(gates.shape))
+        logging.info("gate.py: gates {}".format(gates))
         # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],].shape))
         # print("gate.py: placeholder {}".format(self.placeholder[:, : hidden_states[0].shape[-2],]))
 

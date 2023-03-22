@@ -8,30 +8,30 @@ load_nq, Dataset, Collator
 from transformers import T5Tokenizer
 from ..models.fid import FiDT5
 
-def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
-    hidden_states_ = []
-
+def  fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
+    decoder_hidden_states = []
+    encoder_embedding = []
     def get_hook(i):
         def hook(module, inputs, outputs=None):
-            if i == 0:
-                logging.debug("embedding outputs{} {}".format(type(outputs),outputs))
-                hidden_states_.append(outputs)
-            elif 1 <= i <= len(model.decoder.block):
-                hidden_states_.append(inputs[0])
-            elif i == len(model.decoder.block) + 1:
-                hidden_states_.append(outputs[0])
-
+            if 0 <= i < len(model.decoder.block):
+                # bsz*n_context, len, hidden_size
+                decoder_hidden_states.append(inputs[0])
+            elif i == len(model.decoder.block):
+                decoder_hidden_states.append(outputs[0])
         return hook
+    
+    def encoder_hook(module, inputs, outputs=None):
+        encoder_embedding.append(outputs)
 
     handles = (
-            [model.decoder.embed_tokens.register_forward_hook(get_hook(0))]
-            + [
-                model.decoder.block.register_forward_pre_hook(get_hook(i + 1))
+            [model.encoder.encoder.embed_tokens.register_forward_hook(encoder_hook)]+
+            [
+                block.register_forward_pre_hook(get_hook(i))
                 for i, block in enumerate(model.decoder.block)
             ]
             + [
                 model.decoder.block[-1].register_forward_hook(
-                    get_hook(len(model.decoder.block) + 1)
+                    get_hook(len(model.decoder.block))
                 )
             ]
     )
@@ -40,67 +40,35 @@ def fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
         if forward_fn is None:
             logging.debug("passage_ids {}, passage_masks {}".format(passage_ids.shape, passage_masks.shape))
             # loss, logits, ...
-            outputs = model(input_ids = passage_ids, attention_mask = passage_masks, lm_labels = target_ids)[1]
+            logits = model(input_ids = passage_ids, attention_mask = passage_masks, lm_labels = target_ids)[1]
         else:
-            outputs = forward_fn(passage_ids, passage_masks, 20)
+            logits = forward_fn(passage_ids, passage_masks, 20)
     finally:
         for handle in handles:
             handle.remove()
 
-    return outputs, tuple(hidden_states_)
+    return logits, tuple(decoder_hidden_states), encoder_embedding[0]
 
-def fid_setter(model, passage_ids, passage_masks, target_ids, hidden_states, forward_fn=None):
-
-    hidden_states_ = []
-
-    def get_hook(i):
-        def hook(module, inputs, outputs=None):
-            if i == 0:
-                if hidden_states[i] is not None:
-                    hidden_states_.append(hidden_states[i])
-                    return hidden_states[i]
-                else:
-                    hidden_states_.append(outputs)
-
-            # elif 1 <= i <= len(model.bert.encoder.layer):
-            #     if hidden_states[i] is not None:
-            #         hidden_states_.append(hidden_states[i])
-            #         return (hidden_states[i],) + inputs[1:]
-            #     else:
-            #         hidden_states_.append(inputs[0])
-
-            # elif i == len(model.bert.encoder.layer) + 1:
-            #     if hidden_states[i] is not None:
-            #         hidden_states_.append(hidden_states[i])
-            #         return (hidden_states[i],) + outputs[1:]
-            #     else:
-            #         hidden_states_.append(outputs[0])
-
-        return hook
+def fid_setter(model, passage_ids, passage_masks, target_ids, new_hidden_states, forward_fn=None):
+    # change encoder embedding output
+    def hook(module, inputs, outputs=None):
+            if new_hidden_states is not None:
+                return new_hidden_states
 
     handles = (
-        [model.encoder.encoder.embed_tokens.register_forward_hook(get_hook(0))]
-        # + [
-        #     block.register_forward_pre_hook(get_hook(i + 1))
-        #     for i, block in enumerate(model.decoder.block)
-        # ]
-        # + [
-        #     model.decoder.block[-1].register_forward_hook(
-        #         get_hook(len(model.decoder.block) + 1)
-        #     )
-        # ]
+        [model.encoder.encoder.embed_tokens.register_forward_hook(hook)]
     )
 
     try:
         if forward_fn is None:
-            outputs = model(input_ids = passage_ids, attention_mask = passage_masks, labels = target_ids)[1]
+            logits = model(input_ids = passage_ids, attention_mask = passage_masks, labels = target_ids)[1]
         else:
-            outputs = forward_fn(passage_ids, passage_masks)
+            logits = forward_fn(passage_ids, passage_masks)
     finally:
         for handle in handles:
             handle.remove()
 
-    return outputs, tuple(hidden_states_)
+    return logits
 
 def bert_getter(model, inputs_dict, forward_fn=None):
 
@@ -310,9 +278,10 @@ def test_fid_getter():
     
     model = FiDT5.from_pretrained("/data/tanhexiang/CF_QA/models/reader/nq_reader_base")
     model.eval()
-    (loss, logits, decoder_hidden_states) = model(passage_ids, passage_mask, labels = target_ids, output_hidden_states=True)
-    print(len(origin_output))
-    
+    (loss, logits, decoder_hidden_states) = model(passage_ids, passage_mask, lm_labels = target_ids, output_hidden_states=True)
+    print("decoder_hidden_states:{}".format(len(decoder_hidden_states)))
+    for i, s in enumerate(decoder_hidden_states):
+        print("i:{} hidden_state:{}".format(i,s.shape))
 
 def test_bert_getter():
 

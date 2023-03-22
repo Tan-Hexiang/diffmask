@@ -210,9 +210,20 @@ class FidQuestionAnsweringNQDiffMask(
         self.alpha = torch.nn.ParameterList(
             [
                 torch.nn.Parameter(torch.ones(()))
-                for _ in range(self.net.config.num_layers + 2)
+                for _ in range(self.net.config.num_layers + 1)
             ]
         )
+        # mask vector
+        if hparams.placeholder:
+            self.placeholder = torch.nn.Parameter(
+                torch.nn.init.xavier_normal_(
+                    torch.empty(1, 1, self.net.config.d_model*self.max_len,)
+                )
+            )
+        else:
+            self.register_buffer(
+                "placeholder", torch.zeros((1, 1, self.net.config.d_model*self.max_len,)),
+            )
 
         gate = DiffMaskGateInput_FidDecoder
 
@@ -221,23 +232,14 @@ class FidQuestionAnsweringNQDiffMask(
             max_len=hparams.text_maxlength,
             hidden_size=self.net.config.d_model,
             hidden_attention=self.net.config.d_model // 4,
-            num_hidden_layers=self.net.config.num_layers + 2,
+            # decoder 12layer input + last layer output
+            num_hidden_layers=self.net.config.num_layers + 1,
             max_position_embeddings=1,
             gate_fn=MLPMaxGate if self.hparams.gate == "input" else MLPGate,
             gate_bias=hparams.gate_bias,
-            placeholder=hparams.placeholder,
             init_vector=None,
         )
 
-        self.register_buffer(
-            "running_acc", torch.ones((self.net.config.num_hidden_layers + 2,))
-        )
-        self.register_buffer(
-            "running_l0", torch.ones((self.net.config.num_hidden_layers + 2,))
-        )
-        self.register_buffer(
-            "running_steps", torch.zeros((self.net.config.num_hidden_layers + 2,))
-        )
         for name, p in self.named_parameters():
             if p.requires_grad:
                 # print("requires_grad: {}".format(name))
@@ -256,59 +258,44 @@ class FidQuestionAnsweringNQDiffMask(
         self.net.eval()
         (index, target_ids, target_mask, passage_ids, passage_mask) = batch
 
-        logits_orig, hidden_states = fid_getter(
+        logits_orig, decoder_hidden_states, encoder_embedding = fid_getter(
             self.net, passage_ids, passage_mask, target_ids
         )
         logging.info("logits_orig:{}".format(logits_orig))
-        logging.info("hidden_states: {} {}".format(type(hidden_states),len(hidden_states)))
-        print("hidden_states: {} {}".format(type(hidden_states),len(hidden_states)))
+        logging.info("decoder_hidden_states: {} {}".format(type(decoder_hidden_states),len(decoder_hidden_states)))
+        logging.info("encoder_embeddings: {} {}".format(type(encoder_embedding),encoder_embedding.shape))
+
         if layer_pred is None:
             if self.hparams.layer_pred == -1:
-                if self.hparams.stop_train:
-                    criterion = lambda i: (
-                        self.running_acc[i] > 0.75
-                        and self.running_l0[i] < 0.1
-                        and self.running_steps[i] > 100
-                    )
-                    p = np.array(
-                        [0.1 if criterion(i) else 1 for i in range(len(hidden_states))]
-                    )
-                    layer_pred = np.random.choice(
-                        range(len(hidden_states)), (), p=p / p.sum()
-                    ).item()
-                else:
-                    layer_pred = torch.randint(len(hidden_states), ()).item()
+                layer_pred = torch.randint(len(decoder_hidden_states), ()).item()
             else:
                 layer_pred = self.hparams.layer_pred
-
-        if "hidden" in self.hparams.gate:
-            layer_drop = layer_pred
-        else:
-            layer_drop = 0
-
         (
-            new_hidden_states,
             gates,
             expected_L0,
             gates_full,
             expected_L0_full,
         ) = self.gate(
-            hidden_states=hidden_states,
+            hidden_states=decoder_hidden_states,
             layer_pred=None if attribution else layer_pred,
         )
 
         if attribution:
             return logits_orig, expected_L0_full
         else:
-            # mask decoder embedding之后的向量
-            new_hidden_states = (
-                [None] * layer_drop
-                + [new_hidden_states]
-                + [None] * (len(hidden_states) - layer_drop - 1)
-            )
-
+            # mask encoder embedding之后的向量 
+            # bsz*n_context,len,dim
+            temp,len,dim = encoder_embedding.shape
+            bsz = (temp/self.hparams.n_context)
+            new_encoder_embedding = encoder_embedding.view(bsz, self.hparams.n_context, -1)
+            # bsz,n_context,len*dim
+            new_encoder_embedding = new_encoder_embedding * gates.unsqueeze(-1) 
+            + self.placeholde *(1 - gates).unsqueeze(-1)
+            logging.info("new_encoder_embedding shape :{}".format(new_encoder_embedding.shape))
+            logging.debug("new_encoder_embedding detail: {}".format(new_encoder_embedding))
+         
             logits, _ = fid_setter(
-                self.net, passage_ids, passage_mask, target_ids, hidden_states=new_hidden_states,
+                self.net, passage_ids, passage_mask, target_ids, new_hidden_states=new_encoder_embedding,
             )
         return (
             logits,
@@ -317,106 +304,5 @@ class FidQuestionAnsweringNQDiffMask(
             expected_L0,
             gates_full,
             expected_L0_full,
-            layer_drop,
             layer_pred,
         )
-
-
-class PerSampleFidQuestionAnsweringNQDiffMask(FidQuestionAnsweringNQDiffMask):
-    def __init__(self, hparams):
-        super().__init__(hparams)
-
-        self.gate = PerSampleDiffMaskGate(
-            hidden_size=self.net.config.hidden_size,
-            num_hidden_layers=1,
-            max_position_embeddings=384,
-            batch_size=1,
-            placeholder=False,
-            init_vector=None,
-        )
-
-        self.alpha = torch.nn.Parameter(torch.ones((1,)))
-
-    def prepare_data(self):
-        # assign to use in dataloaders
-        samples = [int(e) for e in self.hparams.samples.split(",")]
-        if (
-            not hasattr(self, "train_dataset")
-            or not hasattr(self, "train_dataset_orig")
-        ) and self.training:
-            self.train_dataset, self.train_dataset_orig = self._squad_reader(
-                self.hparams.train_filename,
-            )
-
-            self.train_dataset_orig = list(self.train_dataset_orig)
-            self.train_dataset = torch.utils.data.Subset(self.train_dataset, samples)
-            self.train_dataset_orig = {
-                self.train_dataset_orig[i][0]: self.train_dataset_orig[i][1]
-                for i in samples
-            }
-
-        if not hasattr(self, "val_dataset") or not hasattr(self, "val_dataset_orig"):
-            self.val_dataset, self.val_dataset_orig = self._squad_reader(
-                self.hparams.val_filename,
-            )
-
-            self.val_dataset_orig = list(self.val_dataset_orig)
-            self.val_dataset = torch.utils.data.Subset(self.val_dataset, samples)
-            self.val_dataset_orig = {
-                self.val_dataset_orig[i][0]: self.val_dataset_orig[i][1]
-                for i in samples
-            }
-
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.train_dataset, batch_size=self.hparams.batch_size, shuffle=False
-        )
-
-    def optimizer_step(
-        self,
-        current_epoch,
-        batch_idx,
-        optimizer,
-        optimizer_idx,
-        second_order_closure=None,
-    ):
-        if optimizer_idx == 0:
-            optimizer.step()
-            optimizer.zero_grad()
-
-            self.gate.logits.data = torch.where(
-                self.gate.logits.data < -10,
-                torch.full_like(self.gate.logits.data, -10),
-                self.gate.logits.data,
-            )
-            self.gate.logits.data = torch.where(
-                self.gate.logits.data > 10,
-                torch.full_like(self.gate.logits.data, 10),
-                self.gate.logits.data,
-            )
-            self.gate.logits.data = torch.where(
-                torch.isnan(self.gate.logits.data),
-                torch.full_like(self.gate.logits.data, 0),
-                self.gate.logits.data,
-            )
-
-        elif optimizer_idx == 1:
-            self.alpha.grad *= -1
-            optimizer.step()
-            optimizer.zero_grad()
-
-            self.alpha.data = torch.where(
-                self.alpha.data < 0,
-                torch.full_like(self.alpha.data, 0),
-                self.alpha.data,
-            )
-            self.alpha.data = torch.where(
-                self.alpha.data > 200,
-                torch.full_like(self.alpha.data, 200),
-                self.alpha.data,
-            )
-            self.alpha.data = torch.where(
-                torch.isnan(self.alpha.data),
-                torch.full_like(self.alpha.data, 1),
-                self.alpha.data,
-            )

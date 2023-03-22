@@ -46,7 +46,7 @@ if __name__ == "__main__":
         default="/data/tanhexiang/CF_QA/models/reader/nq_reader_base",
     )
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=0)
 
@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument("--eps_valid", type=float, default=3)
     parser.add_argument("--acc_valid", type=float, default=0.0)
     parser.add_argument("--placeholder", action="store_true")
-    parser.add_argument("--stop_train", action="store_true")
+    # parser.add_argument("--stop_train", action="store_true")
     parser.add_argument(
         "--gate",
         type=str,
