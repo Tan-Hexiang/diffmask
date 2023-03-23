@@ -24,7 +24,7 @@ class QuestionAnsweringNQ(pl.LightningModule):
         self.hparams = hparams
         # fid固定使用t5的tokenizer
         self.tokenizer = T5Tokenizer.from_pretrained('t5-base', return_dict=False)
-        self.collator = Collator(self.hparams.text_maxlength, self.tokenizer)
+        self.collator = Collator(self.hparams.passage_len, self.tokenizer, target_len=self.hparams.target_len)
         
     def prepare_data(self):
         # assign to use in dataloaders
@@ -34,7 +34,7 @@ class QuestionAnsweringNQ(pl.LightningModule):
             train_data = load_nq(self.hparams.train_filename)
             self.train_dataset =  Dataset(train_data, n_context= self.hparams.n_context, passages_source_path=self.hparams.passages_source_path)
         if not hasattr(self, "val_dataset") :
-            val_data = load_nq(self.hparams.val_filename)
+            val_data = load_nq(self.hparams.val_filename)   
             self.val_dataset = Dataset(val_data, n_context=self.hparams.n_context, passages_source_path=self.hparams.passages_source_path)
 
     def train_dataloader(self):
@@ -210,10 +210,10 @@ def encode_passages(batch_text_passages, tokenizer, max_length):
     return passage_ids, passage_masks.bool()
 
 class Collator(object):
-    def __init__(self, text_maxlength, tokenizer, answer_maxlength=20):
+    def __init__(self, passage_len, tokenizer, target_len=20):
         self.tokenizer = tokenizer
-        self.text_maxlength = text_maxlength
-        self.answer_maxlength = answer_maxlength
+        self.passage_len = passage_len
+        self.target_len = target_len
 
     def __call__(self, batch):
         assert(batch[0]['target'] != None)
@@ -221,10 +221,10 @@ class Collator(object):
         target = [ex['target'] for ex in batch]
         target = self.tokenizer.batch_encode_plus(
             target,
-            max_length=self.answer_maxlength if self.answer_maxlength > 0 else None,
+            max_length=self.target_len if self.target_len > 0 else None,
             pad_to_max_length=True,
             return_tensors='pt',
-            truncation=True if self.answer_maxlength > 0 else False,
+            truncation=True if self.target_len > 0 else False,
         )
         target_ids = target["input_ids"]
         target_mask = target["attention_mask"].bool()
@@ -237,6 +237,6 @@ class Collator(object):
         text_passages = [append_question(example) for example in batch]
         passage_ids, passage_masks = encode_passages(text_passages,
                                                      self.tokenizer,
-                                                     self.text_maxlength)
+                                                     self.passage_len)
         ## passage包括question and passages
         return (index, target_ids, target_mask, passage_ids, passage_masks)

@@ -52,7 +52,10 @@ def  fid_getter(model, passage_ids, passage_masks, target_ids, forward_fn=None):
 def fid_setter(model, passage_ids, passage_masks, target_ids, new_hidden_states, forward_fn=None):
     # change encoder embedding output
     def hook(module, inputs, outputs=None):
-            if new_hidden_states is not None:
+            # because T5 use shared embed_tokens, we just mask encoder embedding layer
+            # encoder embedding layer outputs bsz*n_context,passage_len,768
+            # decoder embedding layer outputs bsz,target_len,768
+            if outputs.shape == new_hidden_states.shape:
                 return new_hidden_states
 
     handles = (
@@ -268,7 +271,7 @@ def test_fid_getter():
    
     tokenizer = T5Tokenizer.from_pretrained('t5-base', return_dict=False)
     collator = Collator(200, tokenizer)
-    data = load_nq("/data/tanhexiang/tevatron/tevatron/data_nq/result100/fid.nq.test.jsonl")
+    data = load_nq("/data/tanhexiang/tevatron/tevatron/data_nq/result100/fid.nq.small.jsonl")
     dataset = Dataset(data, n_context=100, passages_source_path="/data/tanhexiang/CF_QA/data/wikipedia_split/psgs_w100.tsv")
     dataloader = torch.utils.data.DataLoader(
                 dataset, batch_size=2, shuffle=True, collate_fn=collator
@@ -278,10 +281,13 @@ def test_fid_getter():
     
     model = FiDT5.from_pretrained("/data/tanhexiang/CF_QA/models/reader/nq_reader_base")
     model.eval()
-    (loss, logits, decoder_hidden_states) = model(passage_ids, passage_mask, lm_labels = target_ids, output_hidden_states=True)
-    print("decoder_hidden_states:{}".format(len(decoder_hidden_states)))
+    outputs = model(passage_ids, passage_mask, lm_labels = target_ids, output_hidden_states=True)
+    print(type(outputs))
+    print(len(outputs))
+    decoder_hidden_states = outputs[3]
     for i, s in enumerate(decoder_hidden_states):
-        print("i:{} hidden_state:{}".format(i,s.shape))
+        print("i {} s {}".format(i,s))
+        exit()
 
 def test_bert_getter():
 

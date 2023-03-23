@@ -17,7 +17,8 @@ from .gates import (
     PerSampleREINFORCEGate,
     MLPMaxGate,
     MLPGate,
-    DiffMaskGateInput_FidDecoder
+    DiffMaskGateInput_FidDecoder,
+    MLPMaxGate_FidDecoder
 )
 from ..optim.lookahead import LookaheadRMSprop
 from ..utils.getter_setter import (
@@ -34,18 +35,10 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
         for p in self.parameters():
             p.requires_grad_(False)
 
-    def training_step(self, batch, batch_idx=None, optimizer_idx=None):
-
-        # if self.training and self.hparams.stop_train and self.hparams.layer_pred != -1:
-        #     if (
-        #         self.running_acc[self.hparams.layer_pred] > 0.75
-        #         and self.running_l0[self.hparams.layer_pred] < 0.05
-        #         and self.running_steps[self.hparams.layer_pred] > 1000
-        #     ):
-        #         return {"loss": torch.tensor(0.0, requires_grad=True)}
+    def training_step(self, batch, batch_idx=None, optimizer_idx=None, name="train"):
 
         (index, target_ids, target_mask, passage_ids, passage_masks) = batch
-        logging.info("index{}, target_ids{}, target_mask{}, passage_ids{}, passage_masks{}".format(index, target_ids, target_mask, passage_ids, passage_masks))
+        logging.debug("index{}, target_ids{}, target_mask{}, passage_ids{}, passage_masks{}".format(index.shape, target_ids.shape, target_mask.shape, passage_ids.shape, passage_masks.shape))
 
         (
             logits,
@@ -54,13 +47,12 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
             expected_L0,
             gates_full,
             expected_L0_full,
-            layer_drop,
             layer_pred,
         ) = self.forward_explainer(batch)
 
-        logging.info("logits:{}".format(logits.shape))
-        logging.info("layer_pred:{}".format(layer_pred.shape))
-        logging.info("layer_pred:{}".format(layer_pred))
+        logging.debug("logits:{}".format(logits.shape))
+        logging.debug("layer_pred:{}".format(layer_pred))
+        logging.debug("layer_pred:{}".format(layer_pred))
         
         loss_c = (
             torch.distributions.kl_divergence(
@@ -72,20 +64,18 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
 
         loss_g = expected_L0.sum(-1) 
 
-        loss = self.alpha[layer_pred] * loss_c + loss_g
+        loss = self.alpha[layer_pred] * loss_c.mean(-1) + loss_g.mean(-1)
 
 
 
-        l0 = expected_L0.exp() .sum(-1)
+        l0 = expected_L0.exp().sum(-1)
 
         outputs_dict = {
-            "loss_c": loss_c.mean(-1),
+            "loss_c": loss_c.mean(-1).mean(-1),
             "loss_g": loss_g.mean(-1),
             "alpha": self.alpha[layer_pred].mean(-1),
             "l0": l0.mean(-1),
             "layer_pred": layer_pred,
-            "r_l0": self.running_l0[layer_pred],
-            "r_steps": self.running_steps[layer_pred],
         }
 
         outputs_dict = {
@@ -100,24 +90,31 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
             for k, v in outputs_dict.items()
         }
 
-        if self.training:
-            self.running_l0[layer_pred] = (
-                self.running_l0[layer_pred] * 0.9 + l0.mean(-1) * 0.1
-            )
-            self.running_steps[layer_pred] += 1
+        tb = self.logger.experiment
+        tb.add_scalar("loss/"+name, loss.mean(-1))
+        tb.add_scalar("l0/"+name, l0.mean(-1))
+        tb.add_scalar("loss_c/"+name, loss_c.mean(-1))
+        tb.add_scalar("loss_g/"+name, loss_g.mean(-1))
+        tb.add_scalar("alpha/"+name, self.alpha[layer_pred].mean(-1))
 
         return outputs_dict
     
     def validation_step(self, batch, batch_idx=None):
-        return self.training_step(batch, batch_idx)
+        return self.training_step(batch, batch_idx,name="val")
 
     def validation_epoch_end(self, outputs):
-
-        loss = sum([e['loss'] for e in outputs ]) / len(outputs)
-        loss_c = sum([e['loss_c'] for e in outputs])/ len(outputs)
-        loss_g = sum([e['loss_g'] for e in outputs])/ len(outputs)
-        l0 = sum([e['l0'] for e in outputs])/len(outputs)
-        alpha = sum([e['alpha'] for e in outputs])/len(outputs)
+        logging.debug(outputs)
+        loss = sum([e['val_loss'] for e in outputs ]) / len(outputs)
+        loss_c = sum([e['val_loss_c'] for e in outputs])/ len(outputs)
+        loss_g = sum([e['val_loss_g'] for e in outputs])/ len(outputs)
+        l0 = sum([e['val_l0'] for e in outputs])/len(outputs)
+        alpha = sum([e['val_alpha'] for e in outputs])/len(outputs)
+        tb = self.logger.experiment
+        tb.add_scalar("val_loss/val_epoch", loss)
+        tb.add_scalar("val_l0/val_epoch", l0)
+        tb.add_scalar("val_loss_c/val_epoch", loss_c)
+        tb.add_scalar("val_loss_g/val_epoch", loss_g)
+        tb.add_scalar("val_alpha/val_epoch", alpha)
         return {
             "val_loss":loss,
             "val_loss_c": loss_c,
@@ -136,9 +133,9 @@ class QuestionAnsweringNQDiffMask(QuestionAnsweringNQ):
                         "lr": self.hparams.learning_rate,
                     },
                     {
-                        "params": self.gate.placeholder.parameters()
-                        if isinstance(self.gate.placeholder, torch.nn.ParameterList)
-                        else [self.gate.placeholder],
+                        "params": self.placeholder.parameters()
+                        if isinstance(self.placeholder, torch.nn.ParameterList)
+                        else [self.placeholder],
                         "lr": self.hparams.learning_rate_placeholder,
                     },
                 ],
@@ -205,8 +202,9 @@ class FidQuestionAnsweringNQDiffMask(
 ):
     def __init__(self, hparams):
         super().__init__(hparams)
+        # 
+        self.target_len = 20
         # lagrange multiplier
-
         self.alpha = torch.nn.ParameterList(
             [
                 torch.nn.Parameter(torch.ones(()))
@@ -217,7 +215,7 @@ class FidQuestionAnsweringNQDiffMask(
         if hparams.placeholder:
             self.placeholder = torch.nn.Parameter(
                 torch.nn.init.xavier_normal_(
-                    torch.empty(1, 1, self.net.config.d_model*self.max_len,)
+                    torch.empty(1, 1, self.net.config.d_model*self.hparams.passage_len)
                 )
             )
         else:
@@ -229,13 +227,14 @@ class FidQuestionAnsweringNQDiffMask(
 
         self.gate = gate(
             n_context=hparams.n_context,
-            max_len=hparams.text_maxlength,
+            target_len = self.hparams.target_len,
+            passage_len=self.hparams.passage_len,
             hidden_size=self.net.config.d_model,
             hidden_attention=self.net.config.d_model // 4,
             # decoder 12layer input + last layer output
             num_hidden_layers=self.net.config.num_layers + 1,
             max_position_embeddings=1,
-            gate_fn=MLPMaxGate if self.hparams.gate == "input" else MLPGate,
+            gate_fn=MLPMaxGate_FidDecoder,
             gate_bias=hparams.gate_bias,
             init_vector=None,
         )
@@ -243,9 +242,9 @@ class FidQuestionAnsweringNQDiffMask(
         for name, p in self.named_parameters():
             if p.requires_grad:
                 # print("requires_grad: {}".format(name))
-                logging.info("requires_grad: {} {}".format(name, p.shape))
+                logging.debug("requires_grad: {} {}".format(name, p.shape))
             else:
-                logging.info("close grad of {}".format(name))
+                logging.debug("close grad of {}".format(name))
 
     def forward_explainer(
         self,
@@ -261,9 +260,9 @@ class FidQuestionAnsweringNQDiffMask(
         logits_orig, decoder_hidden_states, encoder_embedding = fid_getter(
             self.net, passage_ids, passage_mask, target_ids
         )
-        logging.info("logits_orig:{}".format(logits_orig))
-        logging.info("decoder_hidden_states: {} {}".format(type(decoder_hidden_states),len(decoder_hidden_states)))
-        logging.info("encoder_embeddings: {} {}".format(type(encoder_embedding),encoder_embedding.shape))
+        logging.debug("logits_orig:{}".format(logits_orig))
+        logging.debug("decoder_hidden_states: {} {}".format(type(decoder_hidden_states),len(decoder_hidden_states)))
+        logging.debug("encoder_embeddings: {} {}".format(type(encoder_embedding),encoder_embedding.shape))
 
         if layer_pred is None:
             if self.hparams.layer_pred == -1:
@@ -285,16 +284,16 @@ class FidQuestionAnsweringNQDiffMask(
         else:
             # mask encoder embedding之后的向量 
             # bsz*n_context,len,dim
-            temp,len,dim = encoder_embedding.shape
-            bsz = (temp/self.hparams.n_context)
+            temp,passage_len,dim = encoder_embedding.shape
+            bsz = int(temp/self.hparams.n_context)
             new_encoder_embedding = encoder_embedding.view(bsz, self.hparams.n_context, -1)
             # bsz,n_context,len*dim
-            new_encoder_embedding = new_encoder_embedding * gates.unsqueeze(-1) 
-            + self.placeholde *(1 - gates).unsqueeze(-1)
-            logging.info("new_encoder_embedding shape :{}".format(new_encoder_embedding.shape))
+            new_encoder_embedding = new_encoder_embedding * gates.unsqueeze(-1) + self.placeholder *(1 - gates).unsqueeze(-1)
+            new_encoder_embedding = new_encoder_embedding.view(bsz*self.hparams.n_context, passage_len,dim)
+            logging.debug("new_encoder_embedding shape :{}".format(new_encoder_embedding.shape))
             logging.debug("new_encoder_embedding detail: {}".format(new_encoder_embedding))
          
-            logits, _ = fid_setter(
+            logits = fid_setter(
                 self.net, passage_ids, passage_mask, target_ids, new_hidden_states=new_encoder_embedding,
             )
         return (
