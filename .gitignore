@@ -5,7 +5,9 @@ __pycache__/
 models/
 !diffmask/models
 datasets
-
+outputs
+lightning_logs
+*.ckpt
 # C extensions
 *.so
 
