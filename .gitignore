@@ -2,13 +2,17 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
 models/
-datasets
-outputs
-lightning_logs
+datasets/
+outputs/
+lightning_logs/
 *.ckpt
+*.json
+*.txt
 # C extensions
 *.so
+diffmask.egg-info/
 
 # Distribution / packaging
 .Python
